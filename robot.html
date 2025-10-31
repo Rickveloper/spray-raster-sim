@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>ID Spray Raster — Browser Sim</title>
+  <style>
+    html,body{margin:0;height:100%;background:#0b0f12;color:#e7eef7;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    #hud{position:fixed;top:0;left:0;right:0;padding:.6rem .8rem;background:#0b0f12cc;backdrop-filter:blur(6px);display:flex;gap:.8rem;align-items:center;flex-wrap:wrap;z-index:10}
+    #hud label{font-size:.9rem;opacity:.9}
+    #hud input{width:5.5rem}
+    #hint{margin-left:auto;font-size:.85rem;opacity:.8}
+    canvas{display:block}
+    .btn{padding:.35rem .6rem;border:1px solid #3a4653;border-radius:6px;background:#121821;color:#cfe3ff}
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <label>Dia&nbsp;[in] <input id="dia" type="number" step="0.01" value="40"></label>
+    <label>Stroke&nbsp;[in] <input id="stroke" type="number" step="0.01" value="6"></label>
+    <label>Standoff&nbsp;[mm] <input id="standoff" type="number" step="1" value="20"></label>
+    <label>Passes <input id="passes" type="number" step="1" value="200"></label>
+    <label>Speed <input id="speed" type="number" step="0.1" value="1.5"></label>
+    <button id="reset" class="btn">Reset</button>
+    <div id="hint">Pinch/drag to orbit • Works on iPhone</div>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+  <script>
+  // --- scene ---
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#0b0f12');
+  const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.001, 100);
+  camera.position.set(1.8, 1.4, 1.2);
+  const renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setSize(innerWidth, innerHeight);
+  document.body.appendChild(renderer.domElement);
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+
+  // lights
+  const key = new THREE.DirectionalLight(0xffffff, 1.1); key.position.set(2,3,4);
+  const fill = new THREE.DirectionalLight(0xaec6ff, 0.5); fill.position.set(-3,2,-2);
+  const amb = new THREE.AmbientLight(0x8899aa, 0.5);
+  scene.add(key, fill, amb);
+
+  // floor
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(6,6), new THREE.MeshPhongMaterial({color:0x16202b, shininess:10}));
+  floor.rotation.x = -Math.PI/2; floor.position.y = -0.001; scene.add(floor);
+
+  // cylinder (ID) shell
+  let shell;
+  function makeCylinderShell(diam_m, height_m) {
+    if (shell) scene.remove(shell);
+    // visual inner wall
+    const innerGeom = new THREE.CylinderGeometry(diam_m/2, diam_m/2, height_m, 96, 1, true);
+    const innerMat  = new THREE.MeshPhysicalMaterial({color:0x6f83a7, metalness:0.15, roughness:0.6, side:THREE.BackSide, transparent:true, opacity:0.25});
+    const innerWall = new THREE.Mesh(innerGeom, innerMat);
+    // outer ring (thin visual to imply thickness)
+    const outerGeom = new THREE.CylinderGeometry(diam_m/2*1.01, diam_m/2*1.01, height_m, 96, 1, true);
+    const outerMat  = new THREE.MeshPhysicalMaterial({color:0x9fb3d6, metalness:0.2, roughness:0.5, side:THREE.FrontSide, transparent:true, opacity:0.35});
+    const group = new THREE.Group();
+    group.add(innerWall, new THREE.Mesh(outerGeom, outerMat));
+    group.position.set(0.8, height_m/2, 0);  // place reachable; y=up in Three.js
+    scene.add(group);
+    shell = group;
+  }
+
+  // nozzle point + trail
+  const nozzle = new THREE.Mesh(new THREE.SphereGeometry(0.008, 20, 20), new THREE.MeshBasicMaterial({color:0xffe07a}));
+  scene.add(nozzle);
+  const pathMat = new THREE.LineBasicMaterial({color:0xffb03b, transparent:true, opacity:0.65});
+  let pathLine;
+
+  // params & UI
+  const q = (id)=>document.getElementById(id);
+  function inchesToMeters(inches){ return inches * 0.0254; }
+  function mmToMeters(mm){ return mm / 1000; }
+
+  function calcParams(){
+    const dia_in     = parseFloat(q('dia').value || 40);
+    const stroke_in  = parseFloat(q('stroke').value || 6);
+    const standoffmm = parseFloat(q('standoff').value || 20);
+    const passes     = Math.max(1, Math.floor(parseFloat(q('passes').value || 200)));
+    const speed      = Math.max(0.1, parseFloat(q('speed').value || 1.5));
+
+    const ID_m       = inchesToMeters(dia_in);
+    const radius_m   = ID_m/2;
+    const standoff_m = mmToMeters(standoffmm);
+    const pathR_m    = Math.max(0.001, radius_m - standoff_m); // keep inside wall
+    const stroke_m   = inchesToMeters(stroke_in);
+    const angStep    = 2*Math.PI / passes;
+
+    return {ID_m, pathR_m, stroke_m, passes, angStep, speed};
+  }
+
+  function rebuild() {
+    const {ID_m, stroke_m} = calcParams();
+    makeCylinderShell(ID_m, Math.max(stroke_m*1.6, 0.25));
+    if (pathLine) scene.remove(pathLine);
+    // draw one revolution path preview at mid-height
+    const {pathR_m, passes, angStep} = calcParams();
+    const pts = [];
+    for (let i=0;i<=passes;i++){
+      const a = i*angStep;
+      pts.push(new THREE.Vector3(0.8 + pathR_m*Math.cos(a), shell.position.y, pathR_m*Math.sin(a)));
+    }
+    pathLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), pathMat);
+    scene.add(pathLine);
+  }
+
+  rebuild();
+
+  // animate
+  let t0 = performance.now();
+  function animate(){
+    requestAnimationFrame(animate);
+    controls.update();
+    const t = (performance.now() - t0)/1000;
+    const {pathR_m, stroke_m, passes, angStep, speed} = calcParams();
+    // angle advances with time; each half-stroke we step angle by angStep
+    const strokePhase = (Math.sin(t*speed*Math.PI) + 1)/2; // 0..1
+    const idx = Math.floor((t*speed/2) % passes);
+    const a = idx * angStep;
+
+    const x = 0.8 + pathR_m * Math.cos(a);
+    const z = pathR_m * Math.sin(a);
+    const y = shell ? (shell.position.y - stroke_m/2 + strokePhase*stroke_m) : (stroke_m*strokePhase);
+
+    nozzle.position.set(x,y,z);
+    renderer.setSize(innerWidth, innerHeight);
+    camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+    renderer.render(scene, camera);
+  }
+  animate();
+
+  // UI events
+  ['dia','stroke','standoff','passes','speed'].forEach(id=>{
+    q(id).addEventListener('change', rebuild);
+  });
+  q('reset').addEventListener('click', ()=>{
+    q('dia').value = 40;
+    q('stroke').value = 6;
+    q('standoff').value = 20;
+    q('passes').value = 200;
+    q('speed').value = 1.5;
+    rebuild();
+  });
+
+  // handle resize
+  addEventListener('resize', ()=>renderer.setSize(innerWidth, innerHeight));
+  </script>
+</body>
+</html>
